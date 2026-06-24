@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data
+data/raw/
+data/processed/
+data/external/
+data/augmented/
+*.csv
+*.parquet
+*.h5
+*.hdf5
+
+# Models
+models/checkpoints/*.pt
+models/checkpoints/*.pth
+models/exports/**/*.tflite
+models/exports/**/*.onnx
+*.pkl
+*.joblib
+
+# MLOps
+mlruns/
+wandb/
+.dvc/cache/
+/tmp/
+
+# Docker
+.dockerignore
+
+# Node
+node_modules/
+.next/
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.local
+.env.production
+secrets/
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Monitoring
+monitoring/grafana/data/
+monitoring/prometheus/data/
