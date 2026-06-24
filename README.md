@@ -15,7 +15,6 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docker.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
 
-[![CI/CD](https://github.com/yourusername/NeuroMotion-HAR/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/NeuroMotion-HAR/actions)
 [![codecov](https://codecov.io/gh/yourusername/NeuroMotion-HAR/branch/main/graph/badge.svg)](https://codecov.io/gh/yourusername/NeuroMotion-HAR)
 [![arXiv](https://img.shields.io/badge/arXiv-2024.XXXXX-b31b1b.svg)](https://arxiv.org/abs/2024.XXXXX)
 [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Model-FFD21E)](https://huggingface.co/neuro-motion-har)
