@@ -1,611 +1,287 @@
-<div align="center">
+# Real-Time Activity Recognition via Wearable Sensors
 
-<img src="neuro_motion_banner.svg" alt="NeuroMotion HAR Banner" width="100%"/>
+Recognising what a person is doing (walking, climbing stairs, jogging, sitting, standing) from the
+accelerometer and gyroscope in their phone, in a way that would actually work on a new user, live.
 
-# 🧠 NeuroMotion-HAR
+Most HAR repos report 97–99% accuracy. I wanted to find out how much of that survives two things a
+real deployment can't avoid:
 
-### Real-Time Human Activity Recognition via Wearable Sensors
+1. **The user is someone the model has never seen.** Every result here uses leave-subjects-out
+   cross-validation: no person appears in both training and test.
+2. **Predictions have to be made causally, on a stream.** No looking at the future, a decision every
+   0.5 s, and the output should not flicker between labels.
 
-**An AI-Powered Personal Health Intelligence Platform**
+![stream timeline](figures/stream_timeline.png)
+*A held-out subject replayed through the online pipeline. The raw model flickers at activity
+changes; the HMM filter removes most of that. It also shows a real failure: this person's standing
+segment is called walking for the whole first minute.*
 
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.2+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![Next.js](https://img.shields.io/badge/Next.js-14+-000000?style=for-the-badge&logo=next.js&logoColor=white)](https://nextjs.org)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docker.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](LICENSE)
+## Main findings
 
-[![codecov](https://codecov.io/gh/yourusername/NeuroMotion-HAR/branch/main/graph/badge.svg)](https://codecov.io/gh/yourusername/NeuroMotion-HAR)
-[![arXiv](https://img.shields.io/badge/arXiv-2024.XXXXX-b31b1b.svg)](https://arxiv.org/abs/2024.XXXXX)
-[![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Model-FFD21E)](https://huggingface.co/neuro-motion-har)
-[![Stars](https://img.shields.io/github/stars/yourusername/NeuroMotion-HAR?style=social)](https://github.com/yourusername/NeuroMotion-HAR/stargazers)
+- **Random window splits overestimate performance by 4–5 F1 points.** The same 1D-CNN gets 98.8%
+  macro-F1 with the usual shuffled split and 93.9% on unseen subjects. The split also changes the
+  ranking: with random splits the CNN clearly beats the random forest (98.8 vs 97.6), but on unseen
+  people they are tied (93.9 ± 2.6 vs 93.6 ± 1.5).
+- **Bigger or fancier models did not help.** A ~96k-parameter CNN was as good as anything else. The
+  TCN, Conv-GRU and patch transformer were all 1–2.5 points worse and had higher variance across folds.
+- **The spread between people is larger than the spread between models.** Per-fold F1 for the same
+  CNN ranges from 90.1 to 97.2 depending on which subjects are held out.
+- **Most errors are stairs.** Jogging, sitting and standing are ~98% F1; downstairs is ~86% and is
+  mostly confused with walking and upstairs.
+- **Smoothing fixes flicker, not accuracy.** A causal HMM filter cuts label switches per minute
+  from 2.9 to 1.1 (ground truth: 0.63) at the cost of ~0.9 s extra delay after a real change.
+  Accuracy barely moves: the remaining errors are long, confident mistakes, not noise.
+- **Window length is a real trade-off.** 0.64 s windows → 90.4 F1, 2.56 s → 93.9.
+  Going to 5.12 s adds another 0.9 points but means waiting 5 s for the first answer.
+- **Rotation augmentation is the one that matters.** It adds 2.8 F1 points over no augmentation.
+  Jitter + scaling *without* rotation was actually worse than no augmentation at all (89.9 vs 91.1).
+- **The gravity vector is essential, attitude hurts.** MotionSense's "user acceleration" has gravity
+  removed, so with accelerometer + gyroscope alone sitting and standing are almost indistinguishable
+  (84.2 / 88.9 F1). Adding gravity gives 93.9. Adding attitude (roll/pitch/yaw) drops it to 91.1,
+  probably because yaw depends on which direction the person is facing.
+- **Latency is not the bottleneck.** Every network runs in under 0.5 ms per window on one CPU thread
+  through ONNX Runtime, against a 500 ms decision interval. The random forest is the slowest at ~21 ms,
+  mostly in tree traversal.
 
-<br/>
-
-> **Think: Apple Health × WHOOP × Fitbit × Research-Grade AI**  
-> Real-time activity recognition with explainable AI, digital twin modeling, edge deployment, and clinical-grade health intelligence.
-
-<br/>
-
-[🚀 Live Demo](https://neuro-motion-har.vercel.app) · [📄 Paper](docs/research/paper_draft.md) · [📖 Docs](https://docs.neuro-motion-har.dev) · [💬 Discord](https://discord.gg/neuro-motion)
-
-</div>
-
----
-
-## 🌟 Why NeuroMotion-HAR?
-
-| Feature | Basic HAR | **NeuroMotion-HAR** |
-|---|---|---|
-| Activities | 4–6 | **13+ granular classes** |
-| Models | 1 static | **10+ architectures w/ benchmarks** |
-| Explainability | ❌ | **✅ SHAP + GradCAM + Attention maps** |
-| Edge AI | ❌ | **✅ TFLite + ONNX + RPi + Wear OS** |
-| Digital Twin | ❌ | **✅ Full behavioral modeling** |
-| Anomaly Detection | ❌ | **✅ Autoencoder + Isolation Forest** |
-| MLOps | ❌ | **✅ DVC + MLflow + W&B + Airflow** |
-| Real-time | ❌ | **✅ WebSocket streaming inference** |
-| Health Insights | ❌ | **✅ Fatigue, Recovery, Calorie AI** |
-
----
-
-## 🏗️ System Architecture
-
-```mermaid
-graph TB
-    subgraph "📱 Data Sources"
-        S1[Accelerometer]
-        S2[Gyroscope]
-        S3[Magnetometer]
-        S4[Heart Rate]
-        S5[GPS + Barometer]
-    end
-
-    subgraph "⚡ Edge Layer"
-        E1[TFLite Engine]
-        E2[ONNX Runtime]
-        E3[Raspberry Pi 4]
-        E4[Android / Wear OS]
-    end
-
-    subgraph "🧠 AI Core"
-        M1[CNN-LSTM Ensemble]
-        M2[Temporal Transformer]
-        M3[PatchTST]
-        M4[Anomaly Detector]
-        M5[Health Predictor]
-        M6[XAI Engine / SHAP]
-    end
-
-    subgraph "🔥 Backend"
-        B1[FastAPI + WebSocket]
-        B2[JWT Auth]
-        B3[PostgreSQL + TimescaleDB]
-        B4[Redis Cache]
-        B5[Celery Workers]
-    end
-
-    subgraph "🌐 Frontend"
-        F1[Next.js 14 Dashboard]
-        F2[Real-time Sensor View]
-        F3[Activity Timeline]
-        F4[AI Insights Panel]
-        F5[Digital Twin View]
-    end
-
-    subgraph "📊 MLOps"
-        O1[DVC Pipeline]
-        O2[MLflow Tracking]
-        O3[W&B Sweeps]
-        O4[Airflow DAGs]
-        O5[Prometheus + Grafana]
-    end
-
-    S1 & S2 & S3 & S4 & S5 --> E1 & E4
-    E1 & E4 --> B1
-    B1 --> M1 & M2 & M3
-    M1 & M2 & M3 --> M4 & M5 & M6
-    M4 & M5 & M6 --> B1
-    B1 --> F1
-    F1 --> F2 & F3 & F4 & F5
-    B1 --> O2 & O5
-    O1 --> M1 & M2 & M3
-```
-
----
-
-## 🧬 Deep Learning Architecture Zoo
-
-```mermaid
-graph LR
-    subgraph "Classical ML"
-        C1[Random Forest]
-        C2[XGBoost]
-        C3[LightGBM]
-        C4[CatBoost]
-    end
-
-    subgraph "Deep Learning"
-        D1[1D-CNN]
-        D2[LSTM]
-        D3[Bi-LSTM]
-        D4[GRU]
-        D5[CNN-LSTM Hybrid]
-        D6[TCN]
-    end
-
-    subgraph "🔬 State-of-the-Art"
-        T1[Time Series Transformer]
-        T2[PatchTST]
-        T3[Informer]
-        T4[iTransformer]
-        T5[TimesNet]
-    end
-
-    subgraph "🏆 Ensemble"
-        E1[Stacking Ensemble]
-        E2[Bayesian Model Avg]
-    end
-```
-
----
-
-## 📊 Benchmark Results
-
-### UCI HAR Dataset
-
-| Model | Accuracy | F1-Score | Params | Inference (ms) |
-|---|---|---|---|---|
-| Random Forest | 91.2% | 0.911 | — | 12ms |
-| XGBoost | 93.4% | 0.933 | — | 8ms |
-| 1D-CNN | 95.1% | 0.950 | 847K | 3ms |
-| LSTM | 94.8% | 0.947 | 1.2M | 5ms |
-| CNN-LSTM | 96.3% | 0.962 | 1.5M | 6ms |
-| TCN | 96.8% | 0.967 | 890K | 4ms |
-| Transformer | 97.1% | 0.970 | 2.1M | 9ms |
-| **PatchTST** | **97.8%** | **0.977** | **3.4M** | **11ms** |
-| **Ensemble** | **98.2%** | **0.981** | — | 22ms |
-
-### Cross-Dataset Generalization
-
-| Train → Test | F1-Score |
-|---|---|
-| UCI → WISDM | 0.891 |
-| PAMAP2 → MHEALTH | 0.873 |
-| All → MotionSense | 0.921 |
-
----
-
-## 🚀 Quick Start
-
-### 1. Clone & Setup
+## Setup
 
 ```bash
-git clone https://github.com/yourusername/NeuroMotion-HAR.git
-cd NeuroMotion-HAR
-
-# Setup Python environment
-python -m venv venv && source venv/bin/activate
+git clone https://github.com/Aranya2801/Real-Time-Activity-Recognition-via-Wearable-Sensors.git
+cd Real-Time-Activity-Recognition-via-Wearable-Sensors
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+pip install -e .
 
-# Copy env file
-cp .env.example .env
+python scripts/download_data.py motionsense      # ~75 MB
+pytest -q                                         # 18 tests, ~10 s
 ```
 
-### 2. Download Datasets
+## Reproducing the results
+
+Everything runs on a laptop CPU. On a 2-core machine the main experiment takes about an hour.
 
 ```bash
-python scripts/download/download_all.py
-python scripts/preprocess/preprocess_all.py
+# main table (5-fold leave-subjects-out, all models) - also saves the fold checkpoints
+python scripts/run_experiment.py --models rf cnn convgru tcn transformer --tag main --save-models
+
+# random-split comparison
+python scripts/run_experiment.py --models rf cnn --split random --tag leak_random
+
+# ablations
+python scripts/run_experiment.py --models cnn --window 32  --hop 16 --tag win32
+python scripts/run_experiment.py --models cnn --window 64  --hop 32 --tag win64
+python scripts/run_experiment.py --models cnn --window 256 --hop 64 --tag win256
+python scripts/run_experiment.py --models cnn --sensors acc            --tag sens_acc
+python scripts/run_experiment.py --models cnn --sensors acc gyro       --tag sens_acc_gyro
+python scripts/run_experiment.py --models cnn --sensors acc gyro grav att --tag sens_all
+python scripts/run_experiment.py --models cnn --no-augment             --tag aug_none
+python scripts/run_experiment.py --models cnn --rotate-deg 0           --tag aug_norot
+
+# streaming evaluation + latency (need the checkpoints from the main run)
+python scripts/stream_eval.py --sweep
+python scripts/benchmark_latency.py
+
+# figures and the markdown tables below
+python scripts/make_figures.py
 ```
 
-### 3. Train a Model
+Raw per-fold results (accuracy, macro-F1, per-class F1, confusion matrices) are in `results/*.json`.
+
+## Data and protocol
+
+**MotionSense** ([Malekzadeh et al., 2019](https://github.com/mmalekzadeh/motion-sense)): iPhone 6s in
+the front trouser pocket, 24 subjects (14 male, 10 female, ages 18–46), 50 Hz, six activities.
+Each (activity, trial, subject) is one continuous recording, which is what makes the streaming
+experiments possible. I use the DeviceMotion data: user acceleration, rotation rate and gravity
+(9 channels). Attitude is only used in one ablation.
+
+- Windows: 128 samples (2.56 s), 50% overlap, cut *inside* each recording so no window spans two
+  activities. 21,539 windows in total.
+- Splits: subjects are shuffled into 5 folds (~5 subjects each). For each fold, 2 of the training
+  subjects are held out for early stopping, so the test subjects are never used for model selection.
+- Metric: macro-F1 (classes are imbalanced: walking and sitting have ~2.5× more data than stairs).
+  Mean ± std over the 5 folds.
+- Normalisation statistics come from the training subjects only and are stored inside the model, so
+  an exported model takes raw sensor values.
+
+**UCI-HAR** is supported too (`--dataset uci_har`, `python scripts/download_data.py uci_har`), using the
+raw inertial signals rather than the 561 pre-computed features. I haven't put UCI-HAR numbers in this
+README yet because I want to run them with the same protocol first.
+
+## Models
+
+| Name | What it is | Params |
+|---|---|---:|
+| `rf` | Random forest (300 trees) on 261 hand-crafted features: time stats, spectral band energies, dominant frequency, entropy, axis correlations, per-sensor magnitude | - |
+| `cnn` | 3 conv blocks (64/128/128 filters) + global average pooling | 96k |
+| `convgru` | DeepConvLSTM-style: 2 conv layers then a GRU | 71k |
+| `tcn` | causal dilated TCN, 4 levels, receptive field 181 samples | 134k |
+| `transformer` | patch embedding (8 samples / patch) + 3-layer transformer encoder | 110k |
+
+Training: AdamW, one-cycle LR, label smoothing 0.05, class-weighted loss, up to 30 epochs with early
+stopping on validation-subject macro-F1. Augmentation: random 3D rotation of every xyz triplet
+(±30°, same rotation for all sensors), per-channel scaling and jitter. The rotation is meant to cover
+the fact that everyone's phone sits in their pocket at a slightly different angle.
+
+## Results
+
+### Unseen subjects
+
+![models](figures/models.png)
+
+| Model | Params | Accuracy (%) | Macro-F1 (%) | CPU latency, 1 window (ms) |
+|---|---:|---:|---:|---:|
+| 1D-CNN | 96k | 95.0 ± 2.1 | 93.9 ± 2.6 | 0.17 |
+| Random forest | - | 94.8 ± 1.4 | 93.6 ± 1.5 | 21.23 |
+| TCN | 134k | 94.0 ± 1.6 | 92.7 ± 2.0 | 0.50 |
+| Conv-GRU | 71k | 93.6 ± 2.3 | 92.3 ± 2.2 | 0.37 |
+| Patch transformer | 110k | 93.0 ± 2.1 | 91.3 ± 3.1 | 0.19 |
+
+Latency is the median for one window, batch size 1, a single CPU thread, through onnxruntime
+(for `rf`: feature extraction + predict). Measured on an Intel Xeon @ 2.1 GHz (cloud VM), onnxruntime 1.29. Exported models are 280–550 KB in fp32.
+Dynamic int8 quantisation shrank them 2–4× but made them *slower* on this CPU (e.g. CNN 0.17 → 0.67 ms),
+since it only quantises the linear layers and adds quantise/dequantise steps around the convolutions.
+Static quantisation with calibration data would be the next thing to try.
+
+![confusion](figures/confusion.png)
+
+### Random split vs subject split
+
+![leakage](figures/leakage.png)
+
+| Model | Random window split | Leave-subjects-out | Gap |
+|---|---:|---:|---:|
+| 1D-CNN | 98.8 ± 0.2 | 93.9 ± 2.6 | 4.9 |
+| Random forest | 97.6 ± 0.3 | 93.6 ± 1.5 | 4.0 |
+
+With 50% overlap, every test window shares half its samples with a training window, and the same
+person's gait is in both sets. The random split also hides the variance: ±0.2 vs ±2.6.
+
+### Window length
+
+![window](figures/window_length.png)
+
+| Window | Seconds | Macro-F1 (%) |
+|---:|---:|---:|
+| 32 | 0.64 | 90.4 ± 1.7 |
+| 64 | 1.28 | 92.5 ± 2.1 |
+| 128 | 2.56 | 93.9 ± 2.6 |
+| 256 | 5.12 | 94.8 ± 2.5 |
+
+The window length is also the minimum time before the first decision, so for a live app this is a
+latency/accuracy knob, not just a hyper-parameter.
+
+### Sensors and augmentation (1D-CNN)
+
+| Setting | Macro-F1 (%) |
+|---|---:|
+| acc only | 84.2 ± 6.2 |
+| acc + gyro | 88.9 ± 0.8 |
+| acc + gyro + gravity | 93.9 ± 2.6 |
+| acc + gyro + gravity + attitude | 91.1 ± 2.9 |
+| no augmentation | 91.1 ± 3.1 |
+| jitter + scale, no rotation | 89.9 ± 3.3 |
+| jitter + scale + rotation (default) | 93.9 ± 2.6 |
+
+### Streaming
+
+Each held-out subject's recordings are concatenated in random order into one long stream (24 streams,
+~7.8 hours, ~56k decisions). The model runs every 25 samples (0.5 s) on the last 2.56 s.
+Smoother settings were fixed before looking at the results (EMA α = 0.3, vote over 5, HMM stay = 0.97).
+
+| Smoother | Accuracy (%) | Macro-F1 (%) | Label switches / min | Median delay after a change (s) |
+|---|---:|---:|---:|---:|
+| none (raw) | 93.8 | 92.4 | 2.91 | 1.4 |
+| ema | 93.6 | 92.3 | 1.38 | 2.1 |
+| vote | 93.2 | 91.7 | 1.60 | 2.3 |
+| hmm | 93.6 | 92.2 | 1.06 | 2.2 |
+
+Ground truth has 0.63 activity changes per minute in these streams. Results for the other models
+are in `results/tables.md`; the transformer flickers the most (5.8 switches/min raw).
+
+The HMM is a discrete Bayes filter: the softmax output (from a class-balanced model, so roughly a
+likelihood up to a constant) is combined with a "sticky" transition matrix. Its one parameter trades
+flicker against delay:
+
+![hmm sweep](figures/hmm_sweep.png)
+
+Even at stay = 0.995 the predicted switch rate stays above the true rate. What's left are long
+segments that are confidently wrong (like the standing → walking segment in the first figure), which
+no amount of temporal smoothing can fix.
+
+![per subject](figures/per_subject.png)
+
+Per-subject accuracy (CNN + HMM on the stream) has a median of 96.4%, but subject 19 is at 75.6%.
+A model that is "93% accurate" can still be unusable for some people, which an average hides.
+
+## Running it live
+
+Replay a held-out subject through the online predictor in the terminal (the script picks the fold in
+which that subject was a test subject):
 
 ```bash
-# Quick train with PatchTST
-python training/pipelines/train.py --model patchtst --dataset uci_har --epochs 100
-
-# Full benchmark suite
-python training/pipelines/benchmark.py --all-models --all-datasets
+python scripts/replay.py --subject 5 --speed 20
 ```
 
-### 4. Launch with Docker
+Or serve the exported ONNX model over a WebSocket. It needs only onnxruntime and numpy, no torch:
 
 ```bash
-docker-compose up -d
-# Frontend: http://localhost:3000
-# Backend API: http://localhost:8000
-# MLflow: http://localhost:5000
-# Grafana: http://localhost:3001
+python scripts/benchmark_latency.py        # also writes checkpoints/onnx/*.onnx
+uvicorn serve.app:app --port 8000
 ```
 
-### 5. Run Inference
+The client sends `{"samples": [[ax, ay, az, gx, gy, gz, grx, gry, grz], ...]}` in any chunk size and
+gets back `{"activity": "walking", "confidence": 0.97, "probs": {...}}` every 25 samples. The ring
+buffer and HMM state are per connection. `OnlinePredictor` is tested to give exactly the same outputs
+as the batched evaluation code.
 
-```bash
-# REST API
-curl -X POST http://localhost:8000/api/v1/predict \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"accelerometer": [...], "gyroscope": [...], "heart_rate": 72}'
-
-# Python SDK
-from neuro_motion import NeuroMotionClient
-client = NeuroMotionClient(api_url="http://localhost:8000")
-result = client.predict(sensor_data)
-```
-
----
-
-## 🗂️ Project Structure
+## Repository layout
 
 ```
-NeuroMotion-HAR/
-├── 📦 backend/                  # FastAPI application
-│   └── app/
-│       ├── api/v1/endpoints/    # REST + WebSocket endpoints
-│       ├── core/                # Config, security, logging
-│       ├── db/                  # Database models, migrations
-│       ├── ml/                  # Inference engine, model loader
-│       ├── services/            # Business logic layer
-│       └── schemas/             # Pydantic schemas
-│
-├── 🌐 frontend/                 # Next.js 14 dashboard
-│   └── src/
-│       ├── app/                 # App Router pages
-│       ├── components/          # Reusable UI components
-│       └── hooks/               # Custom React hooks
-│
-├── 🧠 models/                   # Model architectures
-│   ├── architectures/           # PyTorch model definitions
-│   ├── configs/                 # Model hyperparameters
-│   └── exports/                 # TFLite + ONNX exports
-│
-├── 📊 data/                     # Data management
-│   ├── raw/                     # Original datasets
-│   ├── processed/               # Feature-engineered data
-│   └── augmented/               # Augmented training data
-│
-├── 🔬 training/                 # Training infrastructure
-│   ├── pipelines/               # DVC ML pipelines
-│   ├── experiments/             # Experiment configs
-│   └── callbacks/               # Custom training callbacks
-│
-├── 🚀 deployment/               # Deployment configs
-│   ├── docker/                  # Dockerfiles
-│   ├── kubernetes/              # K8s manifests
-│   ├── cloud/                   # AWS/GCP/Azure configs
-│   └── edge/                    # RPi/Android/Wear OS
-│
-├── 📈 mlops/                    # MLOps tooling
-│   ├── dvc/                     # Data versioning
-│   ├── mlflow/                  # Experiment tracking
-│   ├── wandb/                   # Hyperparameter sweeps
-│   └── airflow/                 # Workflow orchestration
-│
-├── 📉 monitoring/               # Observability stack
-│   ├── prometheus/              # Metrics collection
-│   └── grafana/                 # Dashboards
-│
-├── 🔭 research/                 # Research documentation
-│   ├── literature/              # Literature review
-│   ├── benchmarks/              # Benchmark analysis
-│   └── papers/                  # Publications
-│
-├── 🧪 tests/                    # Test suite
-│   ├── unit/                    # Unit tests
-│   ├── integration/             # Integration tests
-│   └── ml/                      # ML model tests
-│
-└── 📜 notebooks/                # Jupyter notebooks
+src/wearhar/
+  data.py         MotionSense / UCI-HAR loading, windowing
+  splits.py       subject folds, random split (for the comparison)
+  features.py     hand-crafted features for the RF baseline
+  models.py       CNN, Conv-GRU, TCN, patch transformer + normalisation wrapper
+  augment.py      rotation / scaling / jitter
+  train.py        training loop, early stopping
+  smoothing.py    causal EMA / vote / HMM smoothers (numpy only)
+  stream.py       OnlinePredictor, stream building, streaming metrics
+  export.py       ONNX export + int8 quantisation
+scripts/          experiment runner, stream eval, latency, figures, replay, download
+serve/app.py      WebSocket inference server
+tests/            unit tests (shapes, causality, splits, online == batched, ONNX round-trip)
+results/          json results of every run + tables.md
+figures/          generated by scripts/make_figures.py
 ```
 
----
-
-## 🧠 AI Health Intelligence Features
-
-### Activity Recognition (13 Classes)
-```
-🚶 Walking     🏃 Running     🧘 Yoga       🏋️ Workout
-🪑 Sitting     🧍 Standing    😴 Sleeping   🚴 Cycling
-🚗 Driving     💻 Desk Work   🧗 Stair Up   🔽 Stair Down
-🧘 Meditation
-```
-
-### Health Predictions
-- 🔋 **Recovery Score** — Sleep quality + HRV + activity load
-- 😴 **Fatigue Level** — Real-time physiological estimation
-- 🔥 **Calorie Burn** — MET-based activity calorie modeling
-- ⚠️ **Sedentary Risk** — Continuous inactivity monitoring
-- 📈 **Health Trends** — Long-term behavioral pattern analysis
-
-### AI Coach Alerts
-```
-💬 "You've been sedentary for 90 minutes. Time for a 5-minute walk."
-💬 "Recovery score: 62/100. Consider lighter activity today."
-💬 "Stress detected via HRV patterns. Breathing exercise recommended."
-💬 "Step goal: 82% complete. 1,450 steps to target."
-```
-
----
-
-## 🔬 Explainable AI
-
-Every prediction includes:
-
-```json
-{
-  "activity": "Running",
-  "confidence": 0.97,
-  "shap_values": {
-    "acc_magnitude": 0.421,
-    "acc_variance": 0.312,
-    "gyro_z": 0.198,
-    "heart_rate": 0.069
-  },
-  "explanation": "High accelerometer magnitude and variance strongly indicate running motion.",
-  "attention_weights": [0.02, 0.08, 0.45, 0.38, 0.07],
-  "decision_boundary_distance": 0.81
-}
-```
-
----
-
-## 📡 API Reference
-
-### Authentication
-```http
-POST /api/v1/auth/register
-POST /api/v1/auth/login
-POST /api/v1/auth/refresh
-```
-
-### Activity Recognition
-```http
-POST /api/v1/predict              # Single prediction
-POST /api/v1/predict/batch        # Batch inference
-WS   /ws/stream                   # Real-time streaming
-GET  /api/v1/activities           # Activity history
-```
-
-### Health Intelligence
-```http
-GET  /api/v1/health/score         # Health score
-GET  /api/v1/health/insights      # AI insights
-GET  /api/v1/health/trends        # Long-term trends
-GET  /api/v1/health/recommendations  # Personalized suggestions
-```
-
-### Digital Twin
-```http
-GET  /api/v1/twin/profile         # User digital profile
-GET  /api/v1/twin/patterns        # Behavior patterns
-POST /api/v1/twin/simulate        # Activity simulation
-```
-
-Full API docs: **http://localhost:8000/docs**
-
----
-
-## 🔧 Configuration
-
-```yaml
-# config/app.yaml
-model:
-  primary: patchtst
-  fallback: cnn_lstm
-  ensemble: true
-  
-sensor:
-  sample_rate: 50  # Hz
-  window_size: 128
-  overlap: 0.5
-  
-health:
-  fatigue_threshold: 0.7
-  sedentary_alert_minutes: 90
-  recovery_model: true
-  
-edge:
-  tflite: true
-  quantization: int8
-  target_latency_ms: 20
-```
-
----
-
-## 📦 Datasets
-
-| Dataset | Activities | Subjects | Sensors | Size |
-|---|---|---|---|---|
-| [UCI HAR](https://archive.ics.uci.edu/ml/datasets/Human+Activity+Recognition+Using+Smartphones) | 6 | 30 | Acc, Gyro | 58MB |
-| [WISDM](https://www.cis.fordham.edu/wisdm/dataset.php) | 6 | 51 | Acc | 20MB |
-| [PAMAP2](https://archive.ics.uci.edu/ml/datasets/PAMAP2+Physical+Activity+Monitoring) | 18 | 9 | IMU, HR | 688MB |
-| [MotionSense](https://github.com/mmalekzadeh/motion-sense) | 6 | 24 | Acc, Gyro | 114MB |
-| [MHEALTH](https://archive.ics.uci.edu/ml/datasets/MHEALTH+Dataset) | 13 | 10 | IMU, ECG | 24MB |
-
-```bash
-# Download all datasets
-python scripts/download/download_all.py --datasets all
-
-# Or individual
-python scripts/download/download_all.py --datasets uci_har wisdm pamap2
-```
-
----
-
-## 🌐 Edge Deployment
-
-### Raspberry Pi 4
-```bash
-# Deploy to RPi
-./deployment/edge/raspberry_pi/deploy.sh --ip 192.168.1.100
-
-# Run on device
-python deployment/edge/raspberry_pi/inference.py --model tflite
-```
-
-### Android / Wear OS
-See [deployment/edge/android/README.md](deployment/edge/android/README.md)
-
-### Model Sizes (Quantized)
-| Model | Float32 | INT8 | ONNX |
-|---|---|---|---|
-| CNN-LSTM | 5.8MB | 1.5MB | 5.2MB |
-| PatchTST | 13.1MB | 3.4MB | 12.8MB |
-| Ensemble | 22.4MB | 6.1MB | 21.9MB |
-
----
-
-## 📈 MLOps Pipeline
-
-```mermaid
-graph LR
-    D[Data] --> DVC[DVC Version]
-    DVC --> P[Preprocess]
-    P --> T[Train]
-    T --> E[Evaluate]
-    E --> M[MLflow Log]
-    M --> W[W&B Sweep]
-    W --> R[Register Model]
-    R --> CD[Deploy]
-    CD --> MON[Monitor]
-    MON --> D
-```
-
-```bash
-# Run full DVC pipeline
-dvc repro
-
-# Launch MLflow UI
-mlflow ui --port 5000
-
-# Run hyperparameter sweep with W&B
-python mlops/wandb/sweep.py --config mlops/wandb/sweep_config.yaml
-
-# View Grafana dashboards
-open http://localhost:3001
-```
-
----
-
-## 🧪 Testing
-
-```bash
-# All tests
-pytest tests/ -v --cov=backend/app
-
-# ML model tests
-pytest tests/ml/ -v
-
-# Load tests
-locust -f tests/e2e/locustfile.py --host=http://localhost:8000
-
-# Pre-commit hooks
-pre-commit run --all-files
-```
-
----
-
-## ☁️ Cloud Deployment
-
-### AWS
-```bash
-# Deploy to ECS
-cd deployment/cloud/aws
-terraform init && terraform apply
-
-# Or use the script
-./deploy_aws.sh --region us-east-1 --env production
-```
-
-### GCP
-```bash
-cd deployment/cloud/gcp
-gcloud run deploy neuro-motion --source .
-```
-
-### Azure
-```bash
-cd deployment/cloud/azure
-az container create --resource-group neuro-motion --file deployment/cloud/azure/aci.yaml
-```
-
----
-
-## 🔭 Research
-
-This project includes a full research component:
-
-- 📄 [Literature Review](research/literature/literature_review.md)
-- 📊 [Benchmark Analysis](research/benchmarks/benchmark_analysis.md)
-- 🔬 [Ablation Studies](research/experiments/ablation_study.md)
-- 📈 [SOTA Comparison](research/benchmarks/sota_comparison.md)
-- 🔮 [Future Work](research/papers/future_work.md)
-
-### Citing NeuroMotion-HAR
-
-```bibtex
-@software{neuro_motion_har_2024,
-  author       = {Your Name},
-  title        = {NeuroMotion-HAR: Real-Time Human Activity Recognition via Wearable Sensors},
-  year         = {2024},
-  publisher    = {GitHub},
-  url          = {https://github.com/yourusername/NeuroMotion-HAR},
-}
-```
-
----
-
-## 🗺️ Roadmap
-
-- [x] Core HAR pipeline (13 classes)
-- [x] Deep learning model zoo
-- [x] FastAPI backend + WebSocket streaming
-- [x] Next.js dashboard
-- [x] MLOps stack (DVC + MLflow + W&B)
-- [x] Edge deployment (TFLite + ONNX)
-- [x] SHAP explainability
-- [x] Anomaly detection
-- [ ] 🔄 Federated learning across devices
-- [ ] 🧬 Personalized fine-tuning API
-- [ ] 📱 Native iOS/Android app
-- [ ] 🏥 Clinical validation study
-- [ ] 🤗 Hugging Face model hub integration
-- [ ] 🌍 Multi-language SDK (Go, Rust, Swift)
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-```bash
-# Fork, clone, create branch
-git checkout -b feature/your-feature
-
-# Make changes, test
-pytest tests/ -v
-
-# Pre-commit checks
-pre-commit run --all-files
-
-# Submit PR
-```
-
----
-
-## 📄 License
-
-MIT License — see [LICENSE](LICENSE)
-
----
-
-<div align="center">
-
-**Built with ❤️ for the open-source AI community**
-
-*Advancing human health through intelligent sensing*
-
-⭐ Star this repo if you find it useful!
-
-</div>
+## Limitations
+
+- 24 subjects is small, so fold-to-fold std is large (±2–3 points). Differences under ~1.5 points
+  between models are not meaningful here.
+- All subjects carried the same phone in the same pocket. The rotation augmentation simulates some
+  placement variation, but this says nothing about a phone in a hand or a bag, or about a smartwatch.
+- The streams are built by gluing separate recordings together, so transitions are abrupt (jogging
+  straight into sitting). Real transitions are gradual and there would also be "other" activities
+  that are not in the label set at all.
+- Latency is measured on a server CPU, not on a phone.
+
+## Things I'd like to try next
+
+- Per-user calibration: a few seconds of labelled data from a new user to fine-tune the last layer.
+  The per-subject plot suggests most of the remaining error is subject-specific.
+- An "unknown activity" option (open-set rejection) instead of forcing one of six labels.
+- Cross-dataset tests (train on MotionSense, test on UCI-HAR's walking/stairs/sitting/standing).
+
+## References
+
+- M. Malekzadeh, R. G. Clegg, A. Cavallaro, H. Haddadi. *Mobile Sensor Data Anonymization.* IoTDI 2019 (MotionSense dataset).
+- D. Anguita, A. Ghio, L. Oneto, X. Parra, J. L. Reyes-Ortiz. *A Public Domain Dataset for Human Activity Recognition Using Smartphones.* ESANN 2013.
+- F. J. Ordóñez, D. Roggen. *Deep Convolutional and LSTM Recurrent Neural Networks for Multimodal Wearable Activity Recognition.* Sensors 2016.
+- S. Bai, J. Z. Kolter, V. Koltun. *An Empirical Evaluation of Generic Convolutional and Recurrent Networks for Sequence Modeling.* 2018.
+- Y. Nie, N. H. Nguyen, P. Sinthong, J. Kalagnanam. *A Time Series is Worth 64 Words (PatchTST).* ICLR 2023.
+- N. Y. Hammerla, S. Halloran, T. Plötz. *Deep, Convolutional, and Recurrent Models for Human Activity Recognition Using Wearables.* IJCAI 2016.
+
+## License
+
+MIT
